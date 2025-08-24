@@ -26,8 +26,8 @@ Este proyecto es una simulación didáctica de la minería de Bitcoin en la term
 
 1. Clonar el repositorio:
    ```bash
-   git clone https://github.com/hipoloco/pypasstool
-   cd pypasstool
+   git clone https://github.com/hipoloco/blockchain-simulator
+   cd blockchain-simulator
    ```
 
 2. Instalar las dependencias:
