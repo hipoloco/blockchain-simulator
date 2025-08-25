@@ -77,7 +77,6 @@ Parámetros disponibles:
 
 - `mineria_bitcoin_interactiva.py`: Simulador interactivo de minería Bitcoin.
 - `blockchain_integridad_interactiva.py`: Simulador visual de integridad y propagación en blockchain.
-- `blocks.json`: Archivo con cabeceras de bloques reales de Bitcoin (más de 18 ejemplos).
 - `make_blocks_json.py`: Script para generar/actualizar `blocks.json` usando la API pública de Blockchain.com.
 
 ---
