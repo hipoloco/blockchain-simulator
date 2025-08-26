@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Simulador interactivo de minería Bitcoin (CLI)
@@ -339,6 +338,8 @@ def main(argv: List[str] | None = None) -> int:
             nonces_validos.add(nonce)
             beep()
             print(f"  ✅ ¡Cumple! ({'0'*args.dificultad}…): nonce={nonce}")
+        else:
+            print("  ❌ Nonce incorrecto. No cumple con la dificultad requerida.")
 
         # Reponer prompt estático SIEMPRE (también cuando no hay acierto y no hay verbose)
         print("> ", end="", flush=True)
