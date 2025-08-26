@@ -332,7 +332,7 @@ def main(argv: List[str] | None = None) -> int:
         intentos += 1
 
         if args.verbose:
-            print(f"\n  Hash: {h_hex}")
+            print(f"  Hash: {h_hex}")
 
         if h_hex.startswith("0" * args.dificultad):
             aciertos.append({"nonce": nonce, "hash": h_hex})
