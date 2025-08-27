@@ -31,6 +31,7 @@ Controles en ejecución:
 from __future__ import annotations
 
 import argparse
+import re
 import hashlib
 import os
 import random
@@ -40,31 +41,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 # ---- Entrada no bloqueante (como en el minero) ----
-from threading import Thread, Event
-from queue import Queue, Empty
-
 # Config UI (se actualiza desde main con --tiempo-fix)
 UI_TIMEBOX_SECONDS = 30
-
-class _InputThread(Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.q = Queue()
-        self.stop_event = Event()
-
-    def run(self):
-        while not self.stop_event.is_set():
-            try:
-                s = input()
-            except (EOFError, KeyboardInterrupt):
-                break
-            self.q.put(s)
-
-    def get_line(self, timeout: float | None):
-        try:
-            return self.q.get(timeout=timeout)
-        except Empty:
-            return None
 
 # ---------------------------------- Utilidades UI ----------------------------------
 ANSI = {
@@ -77,6 +55,121 @@ ANSI = {
     "dim": "\033[2m",
     "box": "\033[90m",
 }
+
+# Utilidades para medir y ajustar texto ignorando secuencias ANSI
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+def strip_ansi(s: str) -> str:
+    return ANSI_RE.sub("", s)
+
+def visible_len(s: str) -> int:
+    return len(strip_ansi(s))
+
+def fit_and_pad(content: str, width: int = 76) -> str:
+    """Trunca sin contar ANSI y rellena a 'width'. Conserva ANSI intacto."""
+    out = []
+    vis = 0
+    i = 0
+    while i < len(content):
+        ch = content[i]
+        if ch == "\x1b":
+            # Copiar secuencia ANSI completa sin afectar el conteo visible
+            m = ANSI_RE.match(content, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        if vis < width:
+            out.append(ch)
+            vis += 1
+            i += 1
+        else:
+            # Truncado (agregar elipsis visibles si hay espacio justo al final)
+            # Reemplazamos los últimos 3 visibles por '...'
+            # Buscar hacia atrás en 'out' para reemplazar visibles
+            repl = 3 if width >= 3 else width
+            # Construir una versión sin ANSI para localizar visibles
+            out_plain = strip_ansi("".join(out))
+            keep_visible = max(0, width - repl)
+            # Reconstruir 'out' manteniendo ANSI pero limitando visibles
+            new_out = []
+            vis2 = 0
+            j = 0
+            s_join = "".join(out)
+            while j < len(s_join) and vis2 < keep_visible:
+                if s_join[j] == "\x1b":
+                    m2 = ANSI_RE.match(s_join, j)
+                    if m2:
+                        new_out.append(m2.group(0))
+                        j = m2.end()
+                        continue
+                new_out.append(s_join[j])
+                vis2 += 1
+                j += 1
+            new_out.append("..."[:repl])
+            out = new_out
+            break
+    # Padding hasta width visibles
+    pad_spaces = max(0, width - visible_len("".join(out)))
+    out.append(" " * pad_spaces)
+    return "".join(out)
+
+# ---------------------- Entrada no bloqueante por plataforma -----------------------
+def _get_line_nb_posix(timeout: Optional[float]) -> Optional[str]:
+    """Devuelve una línea si hay disponible en stdin dentro del timeout; si no, None.
+    Usa select.select, por lo que requiere ENTER para completar la línea."""
+    try:
+        import select
+        r, _, _ = select.select([sys.stdin], [], [], timeout)
+        if r:
+            s = sys.stdin.readline()
+            return s.rstrip("\r\n")
+        return None
+    except Exception:
+        return None
+
+class _NBInputWin:
+    """Acumulador de línea con polling mediante msvcrt en Windows.
+    Echo manual, soporte básico de backspace y enter."""
+    def __init__(self):
+        import msvcrt  # type: ignore
+        self.msvcrt = msvcrt
+        self.buf: List[str] = []
+
+    def get_line(self, timeout: float | None) -> Optional[str]:
+        if timeout is None:
+            timeout = 0.1
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            while self.msvcrt.kbhit():
+                ch = self.msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    print()  # mover a nueva línea tras ENTER
+                    s = "".join(self.buf)
+                    self.buf.clear()
+                    return s
+                # Teclas especiales (flechas, etc.) vienen con prefijo \x00 o \xe0
+                if ch in ("\x00", "\xe0"):
+                    # Consumir el siguiente código y continuar
+                    try:
+                        _ = self.msvcrt.getwch()
+                    except Exception:
+                        pass
+                    continue
+                if ch == "\x08":  # backspace
+                    if self.buf:
+                        self.buf.pop()
+                        # borrar visualmente: retroceso, espacio, retroceso
+                        print("\b \b", end="", flush=True)
+                    continue
+                if ch == "\x03":  # Ctrl+C
+                    raise KeyboardInterrupt
+                # Agregar carácter normal
+                self.buf.append(ch)
+                print(ch, end="", flush=True)
+            # dormir un poco para no monopolizar CPU
+            time.sleep(0.01)
+        return None
 
 def supports_ansi() -> bool:
     if os.name == "nt":
@@ -230,13 +323,12 @@ def box_block(b: Block, status_ok: bool, dificultad: int) -> str:
     top = "┌" + "─"*77 + "┐"
     bot = "└" + "─"*77 + "┘"
     lines.append(color(top, "box"))
-    linea_estado = f"│ idx: {b.index:<3}  ts: {b.timestamp:<10}  {status:<10}  dificultad: {color(str(dificultad),'cyan')}"
-    padding = max(0, 95 - len(linea_estado))
-    lines.append(linea_estado + " " * padding + "│")
-    lines.append("│ " + f"prev_hash: {b.prev_hash}".ljust(76) + "│")
-    lines.append("│ " + f"data     : {b.data}".ljust(76) + "│")
-    lines.append("│ " + f"nonce    : {b.nonce}".ljust(76) + "│")
-    lines.append("│ " + f"hash     : {b.hash}".ljust(76) + "│")
+    estado = f"idx: {b.index:<3}  ts: {b.timestamp:<10}  estado: {status}  dificultad: {color(str(dificultad),'cyan')}"
+    lines.append("│ " + fit_and_pad(estado, 76) + "│")
+    lines.append("│ " + fit_and_pad(f"prev_hash: {b.prev_hash}", 76) + "│")
+    lines.append("│ " + fit_and_pad(f"data     : {b.data}", 76) + "│")
+    lines.append("│ " + fit_and_pad(f"nonce    : {b.nonce}", 76) + "│")
+    lines.append("│ " + fit_and_pad(f"hash     : {b.hash}", 76) + "│")
     lines.append(color(bot, "box"))
     return "\n".join(lines)
 
@@ -244,7 +336,7 @@ def show_chain(chain: DemoChain):
     clear()
     # Cabecera estilo minero + resumen
     print("="*72)
-    print("🧱  Simulador de Minería Bitcoin (demo didáctica)")
+    print("🧱  Integridad de Cadena (demo didáctica)")
     print("="*72)
     zeros = "0"*chain.dificultad if chain.dificultad > 0 else "—"
     print(f"Bloques: {len(chain.blocks)} | Dificultad: {chain.dificultad} (prefijo {zeros}) | Tiempo fix: {UI_TIMEBOX_SECONDS}s")
@@ -283,12 +375,16 @@ def timebox_fix_block(block: Block, dificultad: int, seconds: int = 30, prompt_l
     inicio = time.monotonic()
     next_beep_at = min(5, int(seconds))
 
-    # Hilo lector no bloqueante
-    inp = _InputThread()
-    inp.start()
-
     print(f"[{prompt_label}] Tenés {seconds}s para ingresar nonces. (ENTER para probar, 'salir' cancela)")
     print("> ", end="", flush=True)
+
+    # Preparar lector no bloqueante específico por plataforma
+    nb_win = None
+    if os.name == "nt":
+        try:
+            nb_win = _NBInputWin()
+        except Exception:
+            nb_win = None
 
     while True:
         restante = seconds - (time.monotonic() - inicio)  # float
@@ -305,14 +401,15 @@ def timebox_fix_block(block: Block, dificultad: int, seconds: int = 30, prompt_l
 
         # Espera input sin bloquear el contador
         timeout = max(0.05, min(0.5, restante))
-        s = inp.get_line(timeout=timeout)
+        if os.name == "nt" and nb_win is not None:
+            s = nb_win.get_line(timeout)
+        else:
+            s = _get_line_nb_posix(timeout)
         if s is None:
             continue
 
         s = s.strip()
         if s.lower() in ("salir", "exit", "quit"):
-            try: inp.stop_event.set()
-            except Exception: pass
             return False
 
         # Chequeo de expiración justo antes de procesar
@@ -334,8 +431,6 @@ def timebox_fix_block(block: Block, dificultad: int, seconds: int = 30, prompt_l
         if block.hash.startswith(prefix):
             print(f"  ✅ ¡Hash válido para {prompt_label}! ({'0'*dificultad}…)")
             beep(2200, 120)
-            try: inp.stop_event.set()
-            except Exception: pass
             return True
         else:
             print("  ❌ No cumple. Intenta otro nonce.")
