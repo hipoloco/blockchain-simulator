@@ -65,53 +65,91 @@ def strip_ansi(s: str) -> str:
 def visible_len(s: str) -> int:
     return len(strip_ansi(s))
 
+def _wcwidth(ch: str) -> int:
+    """Aproximación de ancho de celda para terminales (sin dependencias externas).
+    - Combina diacríticos: 0
+    - EAW Wide/Fullwidth: 2
+    - Control/No impreso: 0
+    - Resto: 1
+    Nota: emojis suelen ser W/F o combinaciones con U+FE0F; esto cubre el caso común.
+    """
+    import unicodedata
+    if not ch:
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    cat = unicodedata.category(ch)
+    if cat.startswith('C'):
+        return 0
+    eaw = unicodedata.east_asian_width(ch)
+    if eaw in ('W', 'F'):
+        return 2
+    return 1
+
+def display_width(text: str) -> int:
+    """Ancho mostrado en columnas, ignorando ANSI."""
+    s = strip_ansi(text)
+    w = 0
+    for ch in s:
+        w += _wcwidth(ch)
+    return w
+
 def fit_and_pad(content: str, width: int = 76) -> str:
-    """Trunca sin contar ANSI y rellena a 'width'. Conserva ANSI intacto."""
+    """Trunca y rellena a 'width' columnas de terminal, respetando ANSI y ancho de emoji/Wide."""
     out = []
-    vis = 0
     i = 0
-    while i < len(content):
-        ch = content[i]
-        if ch == "\x1b":
-            # Copiar secuencia ANSI completa sin afectar el conteo visible
-            m = ANSI_RE.match(content, i)
+    cur = 0  # columnas visibles
+    s = content
+    while i < len(s):
+        if s[i] == "\x1b":
+            m = ANSI_RE.match(s, i)
             if m:
                 out.append(m.group(0))
                 i = m.end()
                 continue
-        if vis < width:
-            out.append(ch)
-            vis += 1
-            i += 1
-        else:
-            # Truncado (agregar elipsis visibles si hay espacio justo al final)
-            # Reemplazamos los últimos 3 visibles por '...'
-            # Buscar hacia atrás en 'out' para reemplazar visibles
-            repl = 3 if width >= 3 else width
-            # Construir una versión sin ANSI para localizar visibles
-            out_plain = strip_ansi("".join(out))
-            keep_visible = max(0, width - repl)
-            # Reconstruir 'out' manteniendo ANSI pero limitando visibles
-            new_out = []
-            vis2 = 0
-            j = 0
-            s_join = "".join(out)
-            while j < len(s_join) and vis2 < keep_visible:
-                if s_join[j] == "\x1b":
-                    m2 = ANSI_RE.match(s_join, j)
-                    if m2:
-                        new_out.append(m2.group(0))
-                        j = m2.end()
-                        continue
-                new_out.append(s_join[j])
-                vis2 += 1
-                j += 1
-            new_out.append("..."[:repl])
-            out = new_out
+        ch = s[i]
+        w = _wcwidth(ch)
+        if cur + w > width:
+            # espacio insuficiente: agregar elipsis si hay margen
+            ell = "..."
+            ell_w = display_width(ell)
+            # Quitar espacios finales ya añadidos (no debería haber) y cerrar colores si fuera necesario
+            # Intentar dejar al menos sitio para '...'
+            if width >= ell_w:
+                # recortar 'out' a width - ell_w columnas
+                temp = "".join(out)
+                # reconstruir manteniendo ANSI y alcanzando target
+                new_out = []
+                cur2 = 0
+                j = 0
+                while j < len(temp) and cur2 < (width - ell_w):
+                    if temp[j] == "\x1b":
+                        m2 = ANSI_RE.match(temp, j)
+                        if m2:
+                            new_out.append(m2.group(0))
+                            j = m2.end()
+                            continue
+                    ch2 = temp[j]
+                    w2 = _wcwidth(ch2)
+                    if cur2 + w2 > (width - ell_w):
+                        break
+                    new_out.append(ch2)
+                    cur2 += w2
+                    j += 1
+                new_out.append(ell)
+                out = new_out
+                cur = cur2 + ell_w
+            # Si no hay espacio para '...', simplemente terminamos
             break
-    # Padding hasta width visibles
-    pad_spaces = max(0, width - visible_len("".join(out)))
-    out.append(" " * pad_spaces)
+        else:
+            out.append(ch)
+            cur += w
+            i += 1
+    # Padding hasta 'width' columnas
+    pad = max(0, width - cur)
+    if pad:
+        out.append(" " * pad)
+        cur += pad
     return "".join(out)
 
 # ---------------------- Entrada no bloqueante por plataforma -----------------------
