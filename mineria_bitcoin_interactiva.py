@@ -27,10 +27,7 @@ import sys
 import time
 import getpass
 from dataclasses import dataclass
-from typing import List, Dict, Any
-
-from threading import Thread, Event
-from queue import Queue, Empty
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 
@@ -71,30 +68,72 @@ def beep(freq: int = 2200, dur_ms: int = 120) -> None:
         except Exception:
             pass
 
+def beep_countdown() -> None:
+    """Beep simple (BEL) para cuenta regresiva, evita solapar procesos de audio."""
+    try:
+        print('\a', end='', flush=True)
+    except Exception:
+        pass
+
 
 # --------------------------------------------------------------------------------------
-# Entrada no bloqueante (hilo lector)
+# Entrada no bloqueante por plataforma (sin hilos)
 # --------------------------------------------------------------------------------------
 
-class _InputThread(Thread):
+def _get_line_nb_posix(timeout: Optional[float]) -> Optional[str]:
+    """Devuelve una línea si hay disponible en stdin dentro del timeout; si no, None.
+    Usa select.select, por lo que requiere ENTER para completar la línea.
+    """
+    try:
+        import select
+        r, _, _ = select.select([sys.stdin], [], [], timeout)
+        if r:
+            s = sys.stdin.readline()
+            return s.rstrip("\r\n")
+        return None
+    except Exception:
+        return None
+
+
+class _NBInputWin:
+    """Acumulador de línea con polling mediante msvcrt en Windows.
+    Echo manual, soporte básico de backspace y enter.
+    """
     def __init__(self):
-        super().__init__(daemon=True)
-        self.q = Queue()
-        self.stop_event = Event()
+        import msvcrt  # type: ignore
+        self.msvcrt = msvcrt
+        self.buf: List[str] = []
 
-    def run(self):
-        while not self.stop_event.is_set():
-            try:
-                s = input()
-            except (EOFError, KeyboardInterrupt):
-                break
-            self.q.put(s)
-
-    def get_line(self, timeout: float | None):
-        try:
-            return self.q.get(timeout=timeout)
-        except Empty:
-            return None
+    def get_line(self, timeout: Optional[float]) -> Optional[str]:
+        if timeout is None:
+            timeout = 0.1
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            while self.msvcrt.kbhit():
+                ch = self.msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    print()  # mover a nueva línea tras ENTER
+                    s = "".join(self.buf)
+                    self.buf.clear()
+                    return s
+                if ch in ("\x00", "\xe0"):
+                    # Teclas especiales (flechas, etc.)
+                    try:
+                        _ = self.msvcrt.getwch()
+                    except Exception:
+                        pass
+                    continue
+                if ch == "\x08":  # backspace
+                    if self.buf:
+                        self.buf.pop()
+                        print("\b \b", end="", flush=True)
+                    continue
+                if ch == "\x03":  # Ctrl+C
+                    raise KeyboardInterrupt
+                self.buf.append(ch)
+                print(ch, end="", flush=True)
+            time.sleep(0.01)
+        return None
 
 
 # --------------------------------------------------------------------------------------
@@ -242,7 +281,7 @@ def print_intro(block: BlockHeader, segundos: int, dificultad: int, blocks_path:
     print("\nPulsa ENTER para comenzar el cronómetro…", end="")
     getpass.getpass("")  # input oculto para no mostrar el ENTER
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Simulador interactivo de minería Bitcoin (usa blocks.json real)")
     parser.add_argument("--blocks", type=str, default="blocks.json", help="Ruta al archivo blocks.json (requerido)")
     parser.add_argument("--segundos", type=int, default=60, help="Duración del juego (por defecto 60)")
@@ -280,9 +319,13 @@ def main(argv: List[str] | None = None) -> int:
     # Track nonces que ya dieron acierto
     nonces_validos = set()
 
-    # Lector no bloqueante
-    inp = _InputThread()
-    inp.start()
+    # Preparar lector no bloqueante
+    nb_win = None
+    if os.name == 'nt':
+        try:
+            nb_win = _NBInputWin()
+        except Exception:
+            nb_win = None
 
     # Bucle con timeout duro
     while True:
@@ -292,12 +335,15 @@ def main(argv: List[str] | None = None) -> int:
 
         # Beep agudo por segundo en los últimos 5 segundos
         if next_beep_at >= 1 and restante <= next_beep_at and restante > 0:
-            beep(2200, 120)
+            beep_countdown()
             next_beep_at -= 1
 
         # Espera input sin imprimir prompts repetidos
         timeout = max(0.05, min(0.5, restante))
-        s = inp.get_line(timeout=timeout)
+        if os.name == 'nt' and nb_win is not None:
+            s = nb_win.get_line(timeout)
+        else:
+            s = _get_line_nb_posix(timeout)
         if s is None:
             continue
 
@@ -344,11 +390,7 @@ def main(argv: List[str] | None = None) -> int:
         # Reponer prompt estático SIEMPRE (también cuando no hay acierto y no hay verbose)
         print("> ", end="", flush=True)
 
-    # Parar lector (best-effort)
-    try:
-        inp.stop_event.set()
-    except Exception:
-        pass
+    # No hay hilos que parar; limpieza no requerida
 
     # Limpiar pantalla y reimprimir cabecera para mostrar resultados
     clear_screen()
