@@ -38,7 +38,10 @@ Para actualizar o crear tu propio `blocks.json`:
 python make_blocks_json.py
 ```
 
-O especifica alturas personalizadas:
+- Por defecto selecciona 20 alturas aleatorias entre 0 y la altura actual de la cadena y genera `blocks.json`.
+- Requiere conexión a Internet.
+
+También puedes especificar alturas personalizadas:
 
 ```bash
 python make_blocks_json.py 0 1 2 210000 700000
@@ -108,7 +111,7 @@ Parámetros disponibles:
 
 ## Créditos y fuentes
 
-- Cabeceras obtenidas de [Blockchain.com](https://www.blockchain.com/explorer/blocks/btc).
+- Cabeceras obtenidas vía API pública de `blockchain.info` (servicio de Blockchain.com). Consulta el explorador en [Blockchain.com](https://www.blockchain.com/explorer/blocks/btc).
 - Inspirado en el mecanismo de minería de Bitcoin.
 
 ## Colaboradores
