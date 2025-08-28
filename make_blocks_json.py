@@ -16,12 +16,41 @@ import requests
 
 BLOCK_HEIGHT_URL = "https://blockchain.info/block-height/{height}?format=json"
 RAWBLOCK_URL = "https://blockchain.info/rawblock/{block_hash}"
-HTTP_HEADERS = {"User-Agent": "blockchain-simulator/1.0 (+https://example.local)"}
+HTTP_HEADERS = {"User-Agent": "blockchain-simulator/1.0 (+https://github.com/hipoloco/blockchain-simulator)"}
+MAX_RETRIES = 5
+BASE_DELAY = 0.5  # seconds
+MAX_DELAY = 10.0
+
+def _request_get(url: str, timeout: float = 20.0) -> requests.Response:
+    """GET con reintentos exponenciales y jitter para 429/5xx/errores transitorios."""
+    attempt = 0
+    while True:
+        try:
+            resp = requests.get(url, timeout=timeout, headers=HTTP_HEADERS)
+            # Reintentar en 429 o 5xx
+            if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                if attempt >= MAX_RETRIES:
+                    resp.raise_for_status()
+                    return resp
+                delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt)) + random.uniform(0, 0.25)
+                print(f"[retry] {resp.status_code} GET {url} -> esperando {delay:.2f}s…")
+                time.sleep(delay)
+                attempt += 1
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.Timeout, requests.ConnectionError) as e:
+            if attempt >= MAX_RETRIES:
+                raise
+            delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt)) + random.uniform(0, 0.25)
+            print(f"[retry] {e.__class__.__name__} GET {url} -> esperando {delay:.2f}s…")
+            time.sleep(delay)
+            attempt += 1
 
 RANDOM_COUNT_DEFAULT = 20
 
 def get_block_hash_by_height(height: int) -> str:
-    resp = requests.get(BLOCK_HEIGHT_URL.format(height=height), timeout=20, headers=HTTP_HEADERS)
+    resp = _request_get(BLOCK_HEIGHT_URL.format(height=height), timeout=20)
     resp.raise_for_status()
     data = resp.json()
     blocks = data.get("blocks")
@@ -40,7 +69,7 @@ def get_block_hash_by_height(height: int) -> str:
 def get_latest_height() -> int:
     """Obtiene la altura más reciente de la cadena (mainnet)."""
     url = "https://blockchain.info/q/getblockcount"
-    resp = requests.get(url, timeout=20, headers=HTTP_HEADERS)
+    resp = _request_get(url, timeout=20)
     resp.raise_for_status()
     text = resp.text.strip()
     try:
@@ -58,7 +87,7 @@ def sample_random_heights(n: int = RANDOM_COUNT_DEFAULT) -> List[int]:
     return sorted(random.sample(range(latest + 1), k=k))
 
 def get_block_header_fields(block_hash: str) -> Dict:
-    resp = requests.get(RAWBLOCK_URL.format(block_hash=block_hash), timeout=20, headers=HTTP_HEADERS)
+    resp = _request_get(RAWBLOCK_URL.format(block_hash=block_hash), timeout=20)
     resp.raise_for_status()
     rb = resp.json()
     # Blockchain.com field names
@@ -96,9 +125,31 @@ def get_block_header_fields(block_hash: str) -> Dict:
     }
 
 def main(heights: List[int]) -> None:
-    out = []
+    out: List[Dict] = []
+    # Cache local: si existe blocks.json, reutilizar entradas válidas por altura
+    cache_by_height: Dict[int, Dict] = {}
+    try:
+        with open("blocks.json", "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if isinstance(existing, list):
+            for item in existing:
+                try:
+                    h = int(item.get("height"))
+                    if h not in cache_by_height:
+                        cache_by_height[h] = item
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[warn] No se pudo cargar cache local blocks.json: {e}")
     for h in heights:
         try:
+            cached = cache_by_height.get(h)
+            if cached and all(k in cached for k in ("prev_block", "merkle_root", "version", "timestamp", "bits")):
+                out.append(cached)
+                print(f"[cache] height={h} hash={cached.get('hash','?')}")
+                continue
             bhash = get_block_hash_by_height(h)
             item = get_block_header_fields(bhash)
             out.append(item)
