@@ -31,6 +31,7 @@ Controles en ejecución:
 from __future__ import annotations
 
 import argparse
+import getpass
 import re
 import hashlib
 import os
@@ -470,6 +471,10 @@ def timebox_fix_block(block: Block, dificultad: int, seconds: int = 30, prompt_l
         if block.hash.startswith(prefix):
             print(f"  ✅ ¡Hash válido para {prompt_label}! ({'0'*dificultad}…)")
             beep(2200, 120)
+            try:
+                getpass.getpass("Nonce correcto. Presiona ENTER para continuar...")
+            except Exception:
+                input("Nonce correcto. ENTER para continuar...")
             return True
         else:
             print("  ❌ No cumple. Intenta otro nonce.")
